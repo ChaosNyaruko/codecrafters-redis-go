@@ -32,10 +32,12 @@ func main() {
 	for scanner.Scan() {
 		line := scanner.Text()
 		log.Printf("line: %v", line)
-		_, err = conn.Write([]byte("+PONG\r\n"))
-		if err != nil {
-			fmt.Println("Error Write Conn: ", err.Error())
-			os.Exit(1)
+		if line == "PING" {
+			_, err = conn.Write([]byte("+PONG\r\n"))
+			if err != nil {
+				fmt.Println("Error Write Conn: ", err.Error())
+				os.Exit(1)
+			}
 		}
 	}
 
