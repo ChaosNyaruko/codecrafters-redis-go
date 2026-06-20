@@ -65,6 +65,14 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 	}
 }
 
+func writeWithBail(conn net.Conn, data []byte) {
+	_, err := conn.Write(data)
+	if err != nil {
+		log.Print("Error Write Conn: ", err.Error())
+		os.Exit(1)
+	}
+}
+
 func (bs BulkString) Encode() []byte {
 	var res = make([]byte, 0, len(bs.content)+1+10)
 	res = append(res, '$')
@@ -142,18 +150,10 @@ func main() {
 					if cmd, ok := msg.elements[0].(BulkString); ok {
 						switch strings.ToUpper(cmd.content) {
 						case "PING":
-							_, err = conn.Write([]byte("+PONG\r\n"))
-							if err != nil {
-								fmt.Println("Error Write Conn: ", err.Error())
-								os.Exit(1)
-							}
+							writeWithBail(conn, []byte("+PONG\r\n"))
 						case "ECHO":
 							key := msg.elements[1].(BulkString)
-							_, err = conn.Write(key.Encode())
-							if err != nil {
-								fmt.Println("Error Write Conn: ", err.Error())
-								os.Exit(1)
-							}
+							writeWithBail(conn, key.Encode())
 						default:
 							panic(fmt.Sprintf("unsupported command: %v", cmd.content))
 						}
