@@ -15,6 +15,12 @@ import (
 var _ = net.Listen
 var _ = os.Exit
 
+var store = map[string]any{}
+
+// constants
+var nullBulkString = []byte("$-1\r\n")
+var OK = []byte("+OK\r\n")
+
 type Array struct {
 	elements []any
 }
@@ -154,6 +160,21 @@ func main() {
 						case "ECHO":
 							key := msg.elements[1].(BulkString)
 							writeWithBail(conn, key.Encode())
+						case "GET":
+							key := msg.elements[1].(BulkString).content
+							if val, ok := store[key]; !ok {
+								writeWithBail(conn, nullBulkString)
+							} else {
+								v := val.(string)
+								bv := BulkString{v}
+								writeWithBail(conn, bv.Encode())
+							}
+						case "SET":
+							key := msg.elements[1].(BulkString).content
+							value := msg.elements[2].(BulkString).content
+							store[key] = value
+							writeWithBail(conn, OK)
+
 						default:
 							panic(fmt.Sprintf("unsupported command: %v", cmd.content))
 						}
