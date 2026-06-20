@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"os"
 )
@@ -26,9 +28,19 @@ func main() {
 		fmt.Println("Error accepting connection: ", err.Error())
 		os.Exit(1)
 	}
-	_, err = conn.Write([]byte("+PONG\r\n"))
-	if err != nil {
-		fmt.Println("Error Write Conn: ", err.Error())
-		os.Exit(1)
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Printf("line: %v", line)
+		_, err = conn.Write([]byte("+PONG\r\n"))
+		if err != nil {
+			fmt.Println("Error Write Conn: ", err.Error())
+			os.Exit(1)
+		}
+	}
+
+	if scanner.Err() != nil {
+		log.Printf("scanner err: %v", scanner.Err())
+		os.Exit(69)
 	}
 }
