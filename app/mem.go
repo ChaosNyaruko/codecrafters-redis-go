@@ -39,6 +39,14 @@ func NewStore() *Store {
 	}
 }
 
+func (s *Store) getRaw(key string) any {
+	if val, ok := s.store[key]; !ok || val.ts > 0 && val.ts < time.Now().UnixMilli() {
+		return nil
+	} else {
+		return val
+	}
+}
+
 func (s *Store) start(ctx context.Context, ch <-chan Event) error {
 	for {
 		select {
@@ -72,11 +80,10 @@ func (s *Store) handleEvent(ev Event) error {
 				writeWithBail(ev.conn, key.Encode())
 			case "GET":
 				key := msg.elements[1].(BulkString).content
-				if val, ok := s.store[key]; !ok || val.ts > 0 && val.ts < time.Now().UnixMilli() {
+				if val := s.getRaw(key); val == nil {
 					writeWithBail(ev.conn, nullBulkString)
 				} else {
-					v := val.value.(string)
-					bv := BulkString{v}
+					bv := BulkString{val.(string)}
 					writeWithBail(ev.conn, bv.Encode())
 				}
 			case "SET":
@@ -112,6 +119,25 @@ func (s *Store) handleEvent(ev Event) error {
 					ts:    expired,
 				}
 				writeWithBail(ev.conn, OK)
+			case "RPUSH":
+				listKey := msg.elements[1].(BulkString).content
+				val := s.getRaw(listKey)
+				if val == nil {
+					s.store[listKey] = item{
+						value: make([]any, 0, 5),
+						ts:    -1,
+					}
+				}
+				cur := s.store[listKey].value.([]any)
+				values := msg.elements[2:]
+				cur = append(cur, values...)
+				length := int64(len(cur))
+
+				s.store[listKey] = item{
+					value: cur,
+					ts:    -1,
+				}
+				writeWithBail(ev.conn, Integer{content: length}.Encode())
 			default:
 				panic(fmt.Sprintf("unsupported command: %v", cmd.content))
 			}

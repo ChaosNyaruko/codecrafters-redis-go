@@ -113,3 +113,12 @@ func split(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		panic(fmt.Sprintf("not supported, %v", t))
 	}
 }
+
+func (i Integer) Encode() []byte {
+	var res = make([]byte, 0)
+	res = append(res, ':')
+	value := strconv.Itoa(int(i.content))
+	res = append(res, []byte(value)...)
+	res = append(res, "\r\n"...)
+	return res
+}
