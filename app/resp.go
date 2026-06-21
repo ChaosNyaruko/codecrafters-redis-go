@@ -11,8 +11,12 @@ import (
 var nullBulkString = []byte("$-1\r\n")
 var OK = []byte("+OK\r\n")
 
+type RESP interface {
+	Encode() []byte
+}
+
 type Array struct {
-	elements []any
+	elements []RESP
 }
 
 type Integer struct {
@@ -27,7 +31,7 @@ type Decoder struct {
 	s *bufio.Scanner
 }
 
-func (d *Decoder) Decode(data []byte) (any, error) {
+func (d *Decoder) Decode(data []byte) (RESP, error) {
 	header, content, found := bytes.Cut(data, []byte{'\r', '\n'})
 	if !found {
 		panic("unreachable")
@@ -53,7 +57,7 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 			panic(err)
 		}
 		arr := Array{
-			elements: make([]any, int(count)),
+			elements: make([]RESP, int(count)),
 		}
 		for i := 0; i < int(count); i++ {
 			if d.s.Scan() {
@@ -69,6 +73,18 @@ func (d *Decoder) Decode(data []byte) (any, error) {
 	default:
 		panic(fmt.Sprintf("not supported, %v", t))
 	}
+}
+
+func (arr Array) Encode() []byte {
+	var res = make([]byte, 0, 50)
+	res = append(res, '*')
+	length := strconv.Itoa(len(arr.elements))
+	res = append(res, []byte(length)...)
+	res = append(res, "\r\n"...)
+	for _, a := range arr.elements {
+		res = append(res, a.Encode()...)
+	}
+	return res
 }
 
 func (bs BulkString) Encode() []byte {

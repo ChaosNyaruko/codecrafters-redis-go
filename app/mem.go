@@ -12,7 +12,7 @@ import (
 
 type item struct {
 	data any
-	ts    int64 // expired unix timestamp, milliseconds
+	ts   int64 // expired unix timestamp, milliseconds
 }
 
 type EventType int
@@ -76,7 +76,6 @@ func (s *Store) start(ctx context.Context, ch <-chan Event) error {
 }
 
 func (s *Store) handleEvent(ev Event) error {
-	var err error
 	switch ev.Type {
 	case EventCmd:
 		msg := ev.Data.(Array)
@@ -102,18 +101,7 @@ func (s *Store) handleEvent(ev Event) error {
 				if len(msg.elements) >= 4 {
 					if ex, ok := msg.elements[3].(BulkString); ok {
 						ex := strings.ToUpper(ex.content)
-						var t int
-						switch raw := msg.elements[4].(type) {
-						case BulkString:
-							t, err = strconv.Atoi(raw.content)
-							if err != nil {
-								panic(err)
-							}
-						case Integer:
-							t = int(raw.content)
-						default:
-							panic("cannot parse expiry time as int")
-						}
+						t := toInt(msg.elements[4])
 						if ex == "EX" {
 							expired = time.Now().Add(time.Duration(t) * time.Second).UnixMilli()
 						} else if ex == "PX" {
@@ -125,7 +113,7 @@ func (s *Store) handleEvent(ev Event) error {
 				}
 				s.store[key] = item{
 					data: value,
-					ts:    expired,
+					ts:   expired,
 				}
 				writeWithBail(ev.conn, OK)
 			case "RPUSH":
@@ -134,19 +122,40 @@ func (s *Store) handleEvent(ev Event) error {
 				if val == nil {
 					s.store[listKey] = item{
 						data: make([]any, 0, 5),
-						ts:    -1,
+						ts:   -1,
 					}
 				}
 				cur := s.store[listKey].data.([]any)
 				values := msg.elements[2:]
-				cur = append(cur, values...)
+				for _, v := range values {
+					cur = append(cur, v)
+				}
 				length := int64(len(cur))
 
 				s.store[listKey] = item{
 					data: cur,
-					ts:    -1,
+					ts:   -1,
 				}
 				writeWithBail(ev.conn, Integer{content: length}.Encode())
+			case "LRANGE":
+				listKey := msg.elements[1].(BulkString).content
+				val := s.getRawValue(listKey)
+				if val == nil {
+					writeWithBail(ev.conn, Array{}.Encode())
+					return nil
+				}
+				cur := s.store[listKey].data.([]any)
+				start := max(toInt(msg.elements[2]), 0)
+				stop := min(toInt(msg.elements[3]), len(cur)-1)
+				log.Printf("LRANGE: [%d, %d]", start, stop)
+				res := Array{
+					elements: make([]RESP, stop-start+1),
+				}
+				for i := start; i <= stop; i++ {
+					res.elements[i-start] = cur[i].(RESP)
+				}
+				writeWithBail(ev.conn, res.Encode())
+
 			default:
 				panic(fmt.Sprintf("unsupported command: %v", cmd.content))
 			}
@@ -157,4 +166,19 @@ func (s *Store) handleEvent(ev Event) error {
 		return fmt.Errorf("unknown event: %v", ev)
 	}
 	return nil
+}
+
+func toInt(v RESP) int {
+	switch raw := v.(type) {
+	case BulkString:
+		val, err := strconv.Atoi(raw.content)
+		if err != nil {
+			panic(err)
+		}
+		return val
+	case Integer:
+		return int(raw.content)
+	default:
+		panic("cannot parse expiry time as int")
+	}
 }
