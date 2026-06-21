@@ -11,7 +11,7 @@ import (
 )
 
 type item struct {
-	value any
+	data any
 	ts    int64 // expired unix timestamp, milliseconds
 }
 
@@ -39,11 +39,20 @@ func NewStore() *Store {
 	}
 }
 
-func (s *Store) getRaw(key string) any {
+// getRawValue returns the internal represention of data: string, slice, or other structs
+// not `item`, neither `BulkString` (binary/RESP)s
+func (s *Store) getRawValue(key string) any {
 	if val, ok := s.store[key]; !ok || val.ts > 0 && val.ts < time.Now().UnixMilli() {
 		return nil
 	} else {
-		return val
+		switch v := val.data.(type) {
+		case string:
+			return v
+		case []any:
+			return v
+		default:
+			panic(fmt.Sprintf("unknown internal type: %T", val.data))
+		}
 	}
 }
 
@@ -80,7 +89,7 @@ func (s *Store) handleEvent(ev Event) error {
 				writeWithBail(ev.conn, key.Encode())
 			case "GET":
 				key := msg.elements[1].(BulkString).content
-				if val := s.getRaw(key); val == nil {
+				if val := s.getRawValue(key); val == nil {
 					writeWithBail(ev.conn, nullBulkString)
 				} else {
 					bv := BulkString{val.(string)}
@@ -115,26 +124,26 @@ func (s *Store) handleEvent(ev Event) error {
 					}
 				}
 				s.store[key] = item{
-					value: value,
+					data: value,
 					ts:    expired,
 				}
 				writeWithBail(ev.conn, OK)
 			case "RPUSH":
 				listKey := msg.elements[1].(BulkString).content
-				val := s.getRaw(listKey)
+				val := s.getRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = item{
-						value: make([]any, 0, 5),
+						data: make([]any, 0, 5),
 						ts:    -1,
 					}
 				}
-				cur := s.store[listKey].value.([]any)
+				cur := s.store[listKey].data.([]any)
 				values := msg.elements[2:]
 				cur = append(cur, values...)
 				length := int64(len(cur))
 
 				s.store[listKey] = item{
-					value: cur,
+					data: cur,
 					ts:    -1,
 				}
 				writeWithBail(ev.conn, Integer{content: length}.Encode())
