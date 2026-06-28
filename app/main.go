@@ -13,12 +13,12 @@ import (
 var _ = net.Listen
 var _ = os.Exit
 
-func writeWithBail(conn net.Conn, data []byte) {
-	_, err := conn.Write(data)
-	if err != nil {
-		log.Print("Error Write Conn: ", err.Error())
-		os.Exit(1)
+func settleClient(client chan clientStatus, key string, status any) {
+	cs := clientStatus{
+		blockingKey: key,
+		status:      status,
 	}
+	client <- cs
 }
 
 func main() {
@@ -48,6 +48,7 @@ func main() {
 			decoder := Decoder{
 				scanner,
 			}
+			respCh := make(chan clientStatus)
 			for scanner.Scan() {
 				data := scanner.Bytes()
 				log.Printf("%v, data: %v", conn.RemoteAddr(), data)
@@ -61,10 +62,27 @@ func main() {
 					log.Printf("msg: bulk  string: %v", msg)
 				case Array:
 					log.Printf("msg: array %#v", msg)
-					events <- Event {
-						Type: EventCmd,
-						Data: msg,
-						conn: conn,
+					events <- Event{
+						Type:   EventCmd,
+						Data:   msg,
+						client: respCh,
+					}
+					resp := <-respCh
+					status := resp.status
+					switch s := status.(type) {
+					case []byte:
+						_, err := conn.Write(s)
+						if err != nil {
+							log.Print("Error Write Conn: ", err.Error())
+							os.Exit(1)
+						}
+					case blStatus:
+						data := <- s.result
+						_, err := conn.Write(data)
+						if err != nil {
+							log.Print("Error Write Conn: ", err.Error())
+							os.Exit(1)
+						}
 					}
 				default:
 					panic("unknown")

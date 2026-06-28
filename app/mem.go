@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -23,21 +22,43 @@ const (
 	EventCmd = iota
 )
 
-type Event struct {
-	Type EventType
-	Data any
-	conn net.Conn
-}
-
 type Store struct {
 	store map[string]item
 	t     *time.Ticker
+
+	blockingClients map[string][]*clientStatus
 }
 
 func NewStore() *Store {
 	return &Store{
-		store: make(map[string]item),
-		t:     time.NewTicker(1 * time.Second),
+		store:           map[string]item{},
+		t:               time.NewTicker(time.Second),
+		blockingClients: map[string][]*clientStatus{},
+	}
+}
+
+type blStatus struct {
+	result chan []byte
+}
+
+type clientStatus struct {
+	blockingKey string
+	status      any
+}
+
+type Event struct {
+	Type   EventType
+	Data   any
+	client chan clientStatus
+}
+
+type BlockableList struct {
+	list deque.Deque[any]
+}
+
+func newBlockableList() *BlockableList {
+	return &BlockableList{
+		list: deque.Deque[any]{},
 	}
 }
 
@@ -50,12 +71,24 @@ func (s *Store) getRawValue(key string) any {
 		switch v := val.data.(type) {
 		case string:
 			return v
-		case *deque.Deque[any]:
+		case *BlockableList:
 			return v
 		default:
 			panic(fmt.Sprintf("unknown internal type: %T", val.data))
 		}
 	}
+}
+
+func (s *Store) nonBlockingLPOP(key string) (RESP, bool) {
+	val := s.getRawValue(key)
+	if val == nil {
+		return nil, false
+	}
+	cur := s.store[key].data.(*BlockableList)
+	if cur.list.Len() == 0 {
+		return nil, false
+	}
+	return cur.list.PopFront().(RESP), true
 }
 
 func (s *Store) start(ctx context.Context, ch <-chan Event) error {
@@ -66,6 +99,19 @@ func (s *Store) start(ctx context.Context, ch <-chan Event) error {
 			return nil
 		case <-s.t.C:
 			log.Printf("store timely work")
+			for k, cs := range s.blockingClients {
+				log.Printf("processing blocking key: %v", k)
+				for _, c := range cs {
+					v, got := s.nonBlockingLPOP(c.blockingKey)
+					if !got {
+						break
+					}
+					res := Array{elements: []RESP{
+						BulkString{k}, v,
+					}}
+					c.status.(blStatus).result <- res.Encode()
+				}
+			}
 		case ev, ok := <-ch:
 			if !ok {
 				log.Printf("event channel closed")
@@ -85,17 +131,17 @@ func (s *Store) handleEvent(ev Event) error {
 			command := strings.ToUpper(cmd.content)
 			switch command {
 			case "PING":
-				writeWithBail(ev.conn, []byte("+PONG\r\n"))
+				settleClient(ev.client, "", []byte("+PONG\r\n"))
 			case "ECHO":
 				key := msg.elements[1].(BulkString)
-				writeWithBail(ev.conn, key.Encode())
+				settleClient(ev.client, key.content, key.Encode())
 			case "GET":
 				key := msg.elements[1].(BulkString).content
 				if val := s.getRawValue(key); val == nil {
-					writeWithBail(ev.conn, nullBulkString)
+					settleClient(ev.client, key, nullBulkString)
 				} else {
 					bv := BulkString{val.(string)}
-					writeWithBail(ev.conn, bv.Encode())
+					settleClient(ev.client, key, bv.Encode())
 				}
 			case "SET":
 				key := msg.elements[1].(BulkString).content
@@ -118,17 +164,44 @@ func (s *Store) handleEvent(ev Event) error {
 					data: value,
 					ts:   expired,
 				}
-				writeWithBail(ev.conn, OK)
+				settleClient(ev.client, key, OK)
+			case "BLPOP":
+				listKey := msg.elements[1].(BulkString).content
+				val := s.getRawValue(listKey)
+				if val == nil {
+					s.store[listKey] = item{
+						data: newBlockableList(),
+						ts:   -1,
+					}
+				}
+				cur := s.store[listKey].data.(*BlockableList)
+				// 1. the timeout framework TODO
+				// 2. list blocking
+				// 3. multiple clients sequence
+				// timeout := time.Duration(toInt(msg.elements[1])) * time.Second
+				if cur.list.Len() == 0 {
+					bl := blStatus{
+						result: make(chan []byte),
+					}
+					s.blockingClients[listKey] = append(s.blockingClients[listKey], &clientStatus{
+						blockingKey: listKey,
+						status:      bl,
+					})
+					settleClient(ev.client, listKey, bl)
+				} else {
+					res := cur.list.PopFront().(RESP).Encode()
+					settleClient(ev.client, listKey, res)
+				}
 			case "RPOP", "LPOP":
 				listKey := msg.elements[1].(BulkString).content
 				val := s.getRawValue(listKey)
 				if val == nil {
-					writeWithBail(ev.conn, nullBulkString)
+					settleClient(ev.client, listKey, nullBulkString)
 					return nil
 				}
-				cur := s.store[listKey].data.(*deque.Deque[any])
-				if cur.Len() == 0 {
-					writeWithBail(ev.conn, nullBulkString)
+				cur := s.store[listKey].data.(*BlockableList)
+				if cur.list.Len() == 0 {
+					settleClient(ev.client, listKey, nullBulkString)
 					return nil
 				}
 				num := 1
@@ -140,20 +213,20 @@ func (s *Store) handleEvent(ev Event) error {
 					array = true
 				}
 				for num > 0 {
-					if cur.Len() == 0 {
+					if cur.list.Len() == 0 {
 						break
 					}
 					if command == "RPOP" {
-						res.elements = append(res.elements, cur.PopBack().(RESP))
+						res.elements = append(res.elements, cur.list.PopBack().(RESP))
 					} else {
-						res.elements = append(res.elements, cur.PopFront().(RESP))
+						res.elements = append(res.elements, cur.list.PopFront().(RESP))
 					}
 					num -= 1
 				}
 				if array {
-					writeWithBail(ev.conn, res.Encode())
+					settleClient(ev.client, listKey, res.Encode())
 				} else {
-					writeWithBail(ev.conn, res.elements[0].Encode())
+					settleClient(ev.client, listKey, res.elements[0].Encode())
 				}
 
 			case "RPUSH", "LPUSH":
@@ -161,60 +234,60 @@ func (s *Store) handleEvent(ev Event) error {
 				val := s.getRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = item{
-						data: &deque.Deque[any]{},
+						data: newBlockableList(),
 						ts:   -1,
 					}
 				}
-				cur := s.store[listKey].data.(*deque.Deque[any])
+				cur := s.store[listKey].data.(*BlockableList)
 				values := msg.elements[2:]
 				for _, v := range values {
 					if command == "RPUSH" {
-						cur.PushBack(v)
+						cur.list.PushBack(v)
 					} else {
-						cur.PushFront(v)
+						cur.list.PushFront(v)
 					}
 				}
-				length := int64(cur.Len())
+				length := int64(cur.list.Len())
 
 				s.store[listKey] = item{
 					data: cur,
 					ts:   -1,
 				}
-				writeWithBail(ev.conn, Integer{content: length}.Encode())
+				settleClient(ev.client, listKey, Integer{content: length}.Encode())
 			case "LRANGE":
 				listKey := msg.elements[1].(BulkString).content
 				val := s.getRawValue(listKey)
 				if val == nil {
-					writeWithBail(ev.conn, Array{}.Encode())
+					settleClient(ev.client, listKey, Array{}.Encode())
 					return nil
 				}
-				cur := s.store[listKey].data.(*deque.Deque[any])
+				cur := s.store[listKey].data.(*BlockableList)
 				start := toInt(msg.elements[2])
 				if start < 0 {
-					start = max(start+cur.Len(), 0)
+					start = max(start+cur.list.Len(), 0)
 				}
 				stop := toInt(msg.elements[3])
 				if stop < 0 {
-					stop = max(stop+cur.Len(), 0)
+					stop = max(stop+cur.list.Len(), 0)
 				}
-				stop = min(cur.Len()-1, stop)
+				stop = min(cur.list.Len()-1, stop)
 				log.Printf("LRANGE: [%d, %d]", start, stop)
 				res := Array{
 					elements: make([]RESP, stop-start+1),
 				}
 				for i := start; i <= stop; i++ {
-					res.elements[i-start] = cur.At(i).(RESP)
+					res.elements[i-start] = cur.list.At(i).(RESP)
 				}
-				writeWithBail(ev.conn, res.Encode())
+				settleClient(ev.client, listKey, res.Encode())
 			case "LLEN":
 				listKey := msg.elements[1].(BulkString).content
 				val := s.getRawValue(listKey)
 				res := Integer{0}
 				if val != nil {
-					cur := s.store[listKey].data.(*deque.Deque[any])
-					res.content = int64(cur.Len())
+					cur := s.store[listKey].data.(*BlockableList)
+					res.content = int64(cur.list.Len())
 				}
-				writeWithBail(ev.conn, res.Encode())
+				settleClient(ev.client, listKey, res.Encode())
 
 			default:
 				panic(fmt.Sprintf("unsupported command: %v", cmd.content))
