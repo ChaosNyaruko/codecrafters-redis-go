@@ -67,6 +67,7 @@ func main() {
 						Data:   msg,
 						client: respCh,
 					}
+					log.Printf("event handled")
 					resp := <-respCh
 					status := resp.status
 					switch s := status.(type) {
@@ -77,13 +78,14 @@ func main() {
 							os.Exit(1)
 						}
 					case blStatus:
-						data := <- s.result
+						data := <-s.result
 						_, err := conn.Write(data)
 						if err != nil {
 							log.Print("Error Write Conn: ", err.Error())
 							os.Exit(1)
 						}
 					}
+
 				default:
 					panic("unknown")
 				}

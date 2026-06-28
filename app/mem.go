@@ -38,7 +38,8 @@ func NewStore() *Store {
 }
 
 type blStatus struct {
-	result chan []byte
+	result  chan []byte
+	timeout *time.Timer
 }
 
 type clientStatus struct {
@@ -100,16 +101,30 @@ func (s *Store) start(ctx context.Context, ch <-chan Event) error {
 		case <-s.t.C:
 			log.Printf("store timely work")
 			for k, cs := range s.blockingClients {
+				next := []*clientStatus{}
 				log.Printf("processing blocking key: %v", k)
-				for _, c := range cs {
-					v, got := s.nonBlockingLPOP(c.blockingKey)
-					if !got {
-						break
+				for i, c := range cs {
+					select {
+					case <-c.status.(blStatus).timeout.C:
+						log.Printf("blocking client timeout")
+						c.status.(blStatus).result <- nullBulkString
+					default:
+						v, got := s.nonBlockingLPOP(c.blockingKey)
+						if !got {
+							next = append(next, cs[i:]...)
+							s.blockingClients[k] = next
+							break
+						}
+						res := Array{elements: []RESP{
+							BulkString{k}, v,
+						}}
+						log.Printf("trying to send result: %#v", res)
+						c.status.(blStatus).result <- res.Encode()
+						log.Printf("[over]trying to send result: %#v", res)
 					}
-					res := Array{elements: []RESP{
-						BulkString{k}, v,
-					}}
-					c.status.(blStatus).result <- res.Encode()
+				}
+				if len(next) == 0 {
+					delete(s.blockingClients, k)
 				}
 			}
 		case ev, ok := <-ch:
@@ -178,10 +193,15 @@ func (s *Store) handleEvent(ev Event) error {
 				// 1. the timeout framework TODO
 				// 2. list blocking
 				// 3. multiple clients sequence
-				// timeout := time.Duration(toInt(msg.elements[1])) * time.Second
 				if cur.list.Len() == 0 {
+					timeout := time.Hour * 24 * 365 * 10
+					if len(msg.elements) >= 3 {
+						timeout = time.Duration(toFloat(msg.elements[2]) * float64(time.Second))
+						log.Printf("block duraiton: %v", timeout)
+					}
 					bl := blStatus{
-						result: make(chan []byte),
+						result:  make(chan []byte),
+						timeout: time.NewTimer(timeout),
 					}
 					s.blockingClients[listKey] = append(s.blockingClients[listKey], &clientStatus{
 						blockingKey: listKey,
@@ -299,6 +319,19 @@ func (s *Store) handleEvent(ev Event) error {
 		return fmt.Errorf("unknown event: %v", ev)
 	}
 	return nil
+}
+
+func toFloat(v RESP) float64 {
+	switch raw := v.(type) {
+	case BulkString:
+		val, err := strconv.ParseFloat(raw.content, 64) // s is string
+		if err != nil {
+			panic(err)
+		}
+		return val
+	default:
+		panic("cannot parse expiry time as float")
+	}
 }
 
 func toInt(v RESP) int {
