@@ -20,26 +20,27 @@ type EventType int
 
 const (
 	EventCmd = iota
+	EventCheckBlTimeout
 )
 
 type Store struct {
 	store map[string]item
 	t     *time.Ticker
-
-	blockingClients map[string][]*clientStatus
+	ch    chan Event
 }
 
-func NewStore() *Store {
+func NewStore(ch chan Event) *Store {
 	return &Store{
-		store:           map[string]item{},
-		t:               time.NewTicker(50 * time.Microsecond),
-		blockingClients: map[string][]*clientStatus{},
+		store: map[string]item{},
+		t:     time.NewTicker(1 * time.Second),
+		ch:    ch,
 	}
 }
 
 type blStatus struct {
 	result  chan []byte
-	timeout *time.Timer
+	start   int64
+	timeout int64
 }
 
 type clientStatus struct {
@@ -54,13 +55,38 @@ type Event struct {
 }
 
 type BlockableList struct {
-	list deque.Deque[any]
+	key             string
+	list            deque.Deque[any]
+	blockingClients []*clientStatus
+	close           chan int
+	eventCh         chan Event
 }
 
-func newBlockableList() *BlockableList {
-	return &BlockableList{
-		list: deque.Deque[any]{},
+func newBlockableList(key string, eventCh chan Event) *BlockableList {
+	bl := &BlockableList{
+		list:            deque.Deque[any]{},
+		key:             key,
+		blockingClients: []*clientStatus{},
+		close:           make(chan int),
+		eventCh:         eventCh,
 	}
+	go func() {
+		t := time.NewTicker(50 * time.Millisecond)
+	loop:
+		for {
+			select {
+			case <-t.C:
+				eventCh <- Event{
+					Type: EventCheckBlTimeout,
+					Data: key,
+				}
+			case <-bl.close:
+				log.Printf("blocklist closed")
+				break loop
+			}
+		}
+	}()
+	return bl
 }
 
 // getRawValue returns the internal represention of data: string, slice, or other structs
@@ -92,7 +118,7 @@ func (s *Store) nonBlockingLPOP(key string) (RESP, bool) {
 	return cur.list.PopFront().(RESP), true
 }
 
-func (s *Store) start(ctx context.Context, ch <-chan Event) error {
+func (s *Store) start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -100,46 +126,34 @@ func (s *Store) start(ctx context.Context, ch <-chan Event) error {
 			return nil
 		case <-s.t.C:
 			log.Printf("store timely work")
-			for k, cs := range s.blockingClients {
-				next := []*clientStatus{}
-				log.Printf("processing blocking key: %v", k)
-				for i, c := range cs {
-					select {
-					case <-c.status.(blStatus).timeout.C:
-						log.Printf("blocking client timeout")
-						c.status.(blStatus).result <- nullArray
-					default:
-						v, got := s.nonBlockingLPOP(c.blockingKey)
-						if !got {
-							next = append(next, cs[i:]...)
-							s.blockingClients[k] = next
-							break
-						}
-						res := Array{elements: []RESP{
-							BulkString{k}, v,
-						}}
-						log.Printf("trying to send result: %#v", res)
-						c.status.(blStatus).result <- res.Encode()
-						log.Printf("[over]trying to send result: %#v", res)
-					}
-				}
-				if len(next) == 0 {
-					delete(s.blockingClients, k)
-				}
-			}
-		case ev, ok := <-ch:
+		case ev, ok := <-s.ch:
 			if !ok {
 				log.Printf("event channel closed")
 				return nil
 			}
 			s.handleEvent(ev)
-			log.Printf("event got: %#v", ev)
+			// log.Printf("event got: %#v", ev)
 		}
 	}
 }
 
 func (s *Store) handleEvent(ev Event) error {
 	switch ev.Type {
+	case EventCheckBlTimeout:
+		key := ev.Data.(string)
+		cur := s.store[key].data.(*BlockableList)
+		next := []*clientStatus{}
+		for i, c := range cur.blockingClients {
+			s := c.status.(blStatus)
+			if time.Now().UnixMilli()-s.start >= s.timeout {
+				log.Printf("client removed: %d", i)
+				s.result <- nullBulkString
+			} else {
+				next = append(next, c)
+			}
+		}
+		cur.blockingClients = next
+
 	case EventCmd:
 		msg := ev.Data.(Array)
 		if cmd, ok := msg.elements[0].(BulkString); ok {
@@ -185,22 +199,23 @@ func (s *Store) handleEvent(ev Event) error {
 				val := s.getRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = item{
-						data: newBlockableList(),
+						data: newBlockableList(listKey, s.ch),
 						ts:   -1,
 					}
 				}
 				cur := s.store[listKey].data.(*BlockableList)
 				if cur.list.Len() == 0 {
-					timeout := time.Hour * 24 * 365 * 10
+					var timeout float64 = 24 * 365 * 10 * 3600
 					if len(msg.elements) >= 3 {
-						timeout = time.Duration(toFloat(msg.elements[2]) * float64(time.Second))
-						log.Printf("block duraiton: %v", timeout)
+						timeout = toFloat(msg.elements[2]) * 1000
+						log.Printf("block duration: %v", timeout)
 					}
 					bl := blStatus{
 						result:  make(chan []byte),
-						timeout: time.NewTimer(timeout),
+						start:   time.Now().UnixMilli(),
+						timeout: int64(timeout),
 					}
-					s.blockingClients[listKey] = append(s.blockingClients[listKey], &clientStatus{
+					cur.blockingClients = append(cur.blockingClients, &clientStatus{
 						blockingKey: listKey,
 						status:      bl,
 					})
@@ -251,7 +266,7 @@ func (s *Store) handleEvent(ev Event) error {
 				val := s.getRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = item{
-						data: newBlockableList(),
+						data: newBlockableList(listKey, s.ch),
 						ts:   -1,
 					}
 				}
@@ -270,6 +285,23 @@ func (s *Store) handleEvent(ev Event) error {
 					data: cur,
 					ts:   -1,
 				}
+
+				// wake up blocking clients if possible
+				next := []*clientStatus{}
+				for _, c := range cur.blockingClients {
+					v, got := s.nonBlockingLPOP(c.blockingKey)
+					if got {
+						res := Array{elements: []RESP{
+							BulkString{c.blockingKey}, v,
+						}}
+						log.Printf("trying to send result: %#v", res)
+						c.status.(blStatus).result <- res.Encode()
+						log.Printf("[over]trying to send result: %#v", res)
+					} else {
+						next = append(next, c)
+					}
+				}
+				cur.blockingClients = next
 				settleClient(ev.client, listKey, Integer{content: length}.Encode())
 			case "LRANGE":
 				listKey := msg.elements[1].(BulkString).content

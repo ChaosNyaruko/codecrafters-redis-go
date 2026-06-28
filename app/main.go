@@ -33,8 +33,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events := make(chan Event)
-	store := NewStore()
-	go store.start(ctx, events)
+	store := NewStore(events)
+	go store.start(ctx)
 	for {
 		conn, err := l.Accept()
 		_ = conn.(*net.TCPConn)
