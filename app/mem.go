@@ -127,6 +127,10 @@ func (s *Store) handleEvent(ev Event) error {
 					return nil
 				}
 				cur := s.store[listKey].data.(*deque.Deque[any])
+				if cur.Len() == 0 {
+					writeWithBail(ev.conn, nullBulkString)
+					return nil
+				}
 				num := 1
 				res := Array{elements: []RESP{}}
 				if len(msg.elements) >= 3 {
