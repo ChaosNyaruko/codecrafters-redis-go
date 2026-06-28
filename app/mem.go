@@ -72,7 +72,7 @@ func (s *Store) start(ctx context.Context, ch <-chan Event) error {
 				return nil
 			}
 			s.handleEvent(ev)
-			log.Printf("event got: %v", ev)
+			log.Printf("event got: %#v", ev)
 		}
 	}
 }
@@ -133,9 +133,11 @@ func (s *Store) handleEvent(ev Event) error {
 				}
 				num := 1
 				res := Array{elements: []RESP{}}
+				array := false
 				if len(msg.elements) >= 3 {
 					num = toInt(msg.elements[2])
 					log.Printf("POP num: %d", num)
+					array = true
 				}
 				for num > 0 {
 					if cur.Len() == 0 {
@@ -148,7 +150,11 @@ func (s *Store) handleEvent(ev Event) error {
 					}
 					num -= 1
 				}
-				writeWithBail(ev.conn, res.Encode())
+				if array {
+					writeWithBail(ev.conn, res.Encode())
+				} else {
+					writeWithBail(ev.conn, res.elements[0].Encode())
+				}
 
 			case "RPUSH", "LPUSH":
 				listKey := msg.elements[1].(BulkString).content
