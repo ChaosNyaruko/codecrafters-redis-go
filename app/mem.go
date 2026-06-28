@@ -32,7 +32,7 @@ type Store struct {
 func NewStore() *Store {
 	return &Store{
 		store:           map[string]item{},
-		t:               time.NewTicker(time.Second),
+		t:               time.NewTicker(1 * time.Millisecond),
 		blockingClients: map[string][]*clientStatus{},
 	}
 }
@@ -190,9 +190,6 @@ func (s *Store) handleEvent(ev Event) error {
 					}
 				}
 				cur := s.store[listKey].data.(*BlockableList)
-				// 1. the timeout framework TODO
-				// 2. list blocking
-				// 3. multiple clients sequence
 				if cur.list.Len() == 0 {
 					timeout := time.Hour * 24 * 365 * 10
 					if len(msg.elements) >= 3 {
