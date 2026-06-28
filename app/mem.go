@@ -50,7 +50,7 @@ func (s *Store) getRawValue(key string) any {
 		switch v := val.data.(type) {
 		case string:
 			return v
-		case deque.Deque[any]:
+		case *deque.Deque[any]:
 			return v
 		default:
 			panic(fmt.Sprintf("unknown internal type: %T", val.data))
@@ -119,16 +119,34 @@ func (s *Store) handleEvent(ev Event) error {
 					ts:   expired,
 				}
 				writeWithBail(ev.conn, OK)
+			case "RPOP", "LPOP":
+				listKey := msg.elements[1].(BulkString).content
+				val := s.getRawValue(listKey)
+				if val == nil {
+					writeWithBail(ev.conn, nullBulkString)
+					return nil
+				}
+				cur := s.store[listKey].data.(*deque.Deque[any])
+				if cur.Len() == 0 {
+					writeWithBail(ev.conn, nullBulkString)
+					return nil
+				}
+				if command == "RPOP" {
+					writeWithBail(ev.conn, cur.PopBack().(RESP).Encode())
+				} else {
+					writeWithBail(ev.conn, cur.PopFront().(RESP).Encode())
+				}
+
 			case "RPUSH", "LPUSH":
 				listKey := msg.elements[1].(BulkString).content
 				val := s.getRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = item{
-						data: deque.Deque[any]{},
+						data: &deque.Deque[any]{},
 						ts:   -1,
 					}
 				}
-				cur := s.store[listKey].data.(deque.Deque[any])
+				cur := s.store[listKey].data.(*deque.Deque[any])
 				values := msg.elements[2:]
 				for _, v := range values {
 					if command == "RPUSH" {
@@ -151,7 +169,7 @@ func (s *Store) handleEvent(ev Event) error {
 					writeWithBail(ev.conn, Array{}.Encode())
 					return nil
 				}
-				cur := s.store[listKey].data.(deque.Deque[any])
+				cur := s.store[listKey].data.(*deque.Deque[any])
 				start := toInt(msg.elements[2])
 				if start < 0 {
 					start = max(start+cur.Len(), 0)
@@ -174,7 +192,7 @@ func (s *Store) handleEvent(ev Event) error {
 				val := s.getRawValue(listKey)
 				res := Integer{0}
 				if val != nil {
-					cur := s.store[listKey].data.(deque.Deque[any])
+					cur := s.store[listKey].data.(*deque.Deque[any])
 					res.content = int64(cur.Len())
 				}
 				writeWithBail(ev.conn, res.Encode())
