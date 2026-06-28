@@ -32,7 +32,7 @@ type Store struct {
 func NewStore() *Store {
 	return &Store{
 		store:           map[string]item{},
-		t:               time.NewTicker(1 * time.Millisecond),
+		t:               time.NewTicker(50 * time.Microsecond),
 		blockingClients: map[string][]*clientStatus{},
 	}
 }
