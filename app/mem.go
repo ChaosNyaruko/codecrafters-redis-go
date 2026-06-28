@@ -169,6 +169,15 @@ func (s *Store) handleEvent(ev Event) error {
 					res.elements[i-start] = cur.At(i).(RESP)
 				}
 				writeWithBail(ev.conn, res.Encode())
+			case "LLEN":
+				listKey := msg.elements[1].(BulkString).content
+				val := s.getRawValue(listKey)
+				res := Integer{0}
+				if val != nil {
+					cur := s.store[listKey].data.(deque.Deque[any])
+					res.content = int64(cur.Len())
+				}
+				writeWithBail(ev.conn, res.Encode())
 
 			default:
 				panic(fmt.Sprintf("unsupported command: %v", cmd.content))
