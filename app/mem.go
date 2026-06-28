@@ -147,7 +147,7 @@ func (s *Store) handleEvent(ev Event) error {
 			s := c.status.(blStatus)
 			if time.Now().UnixMilli()-s.start >= s.timeout {
 				log.Printf("client removed: %d", i)
-				s.result <- nullBulkString
+				s.result <- nullArray
 			} else {
 				next = append(next, c)
 			}
