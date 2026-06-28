@@ -127,15 +127,24 @@ func (s *Store) handleEvent(ev Event) error {
 					return nil
 				}
 				cur := s.store[listKey].data.(*deque.Deque[any])
-				if cur.Len() == 0 {
-					writeWithBail(ev.conn, nullBulkString)
-					return nil
+				num := 1
+				res := Array{elements: []RESP{}}
+				if len(msg.elements) >= 3 {
+					num = toInt(msg.elements[2])
+					log.Printf("POP num: %d", num)
 				}
-				if command == "RPOP" {
-					writeWithBail(ev.conn, cur.PopBack().(RESP).Encode())
-				} else {
-					writeWithBail(ev.conn, cur.PopFront().(RESP).Encode())
+				for num > 0 {
+					if cur.Len() == 0 {
+						break
+					}
+					if command == "RPOP" {
+						res.elements = append(res.elements, cur.PopBack().(RESP))
+					} else {
+						res.elements = append(res.elements, cur.PopFront().(RESP))
+					}
+					num -= 1
 				}
+				writeWithBail(ev.conn, res.Encode())
 
 			case "RPUSH", "LPUSH":
 				listKey := msg.elements[1].(BulkString).content
