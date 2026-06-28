@@ -107,7 +107,7 @@ func (s *Store) start(ctx context.Context, ch <-chan Event) error {
 					select {
 					case <-c.status.(blStatus).timeout.C:
 						log.Printf("blocking client timeout")
-						c.status.(blStatus).result <- nullBulkString
+						c.status.(blStatus).result <- nullArray
 					default:
 						v, got := s.nonBlockingLPOP(c.blockingKey)
 						if !got {

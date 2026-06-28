@@ -9,6 +9,7 @@ import (
 
 // constants
 var nullBulkString = []byte("$-1\r\n")
+var nullArray = []byte("*-1\r\n")
 var OK = []byte("+OK\r\n")
 
 type RESP interface {
