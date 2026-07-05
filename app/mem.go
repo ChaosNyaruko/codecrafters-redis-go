@@ -162,8 +162,7 @@ func (s *Store) handleEvent(ev Event) error {
 			case "TYPE":
 				key := msg.elements[1].(BulkString).content
 				_, t := s.getRawValue(key)
-				bv := BulkString{t}
-				settleClient(ev.client, "", bv.Encode())
+				settleClient(ev.client, "", []byte("+"+t+"\r\n"))
 			case "PING":
 				settleClient(ev.client, "", []byte("+PONG\r\n"))
 			case "ECHO":
