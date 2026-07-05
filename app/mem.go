@@ -62,6 +62,35 @@ type entry struct {
 
 type entryID string
 
+type eidGenType int
+
+const (
+	manualEID      eidGenType = 0
+	partialAutoEID            = 1
+	fullAutoEID               = 2
+	errEID                    = 255
+)
+
+func (a entryID) autoGen(lastID entryID) (eidGenType, entryID) {
+	_, lastts, lastsid := lastID.Validate()
+	ida := strings.SplitN(string(a), "-", 2)
+	now := time.Now().UnixMilli()
+	if len(ida) < 2 {
+		if ida[0] == "*" {
+			if now == lastts {
+				return fullAutoEID, entryID(strconv.Itoa(int(now)) + "-" + strconv.Itoa(int(lastsid)+1))
+			}
+			return fullAutoEID, entryID(strconv.Itoa(int(now)) + "-" + strconv.Itoa(0))
+		}
+		return errEID, ""
+	}
+	if ida[1] == "*" {
+		return partialAutoEID, entryID(strconv.Itoa(int(lastts)) + "-" + strconv.Itoa(int(lastsid)+1))
+	}
+
+	return manualEID, a
+}
+
 func (a entryID) Validate() (bool, int64, int64) {
 	ida := strings.SplitN(string(a), "-", 2)
 	if len(ida) < 2 {
@@ -208,16 +237,6 @@ func (s *Store) handleEvent(ev Event) error {
 				// NOTE: we only support explicit id for now.
 				streamKey := msg.elements[1].(BulkString).content
 				id := msg.elements[2].(BulkString).content
-				eid := entryID(id)
-				ok, ts, seqID := eid.Validate()
-				if !ok || (ts == 0 && seqID == 0) {
-					settleClient(ev.client, streamKey,
-						SimpleError{"ERR The ID specified in XADD must be greater than 0-0"}.Encode())
-					return nil
-				}
-				key := msg.elements[3].(BulkString).content
-				value := msg.elements[4].(BulkString).content
-
 				val, t := s.getRawValue(streamKey)
 				if val == nil {
 					s.store[streamKey] = item{
@@ -233,6 +252,17 @@ func (s *Store) handleEvent(ev Event) error {
 					}
 				}
 				stream := s.store[streamKey].data.(*Stream)
+				_, eid := entryID(id).autoGen(stream.lastId)
+				ok, ts, seqID := eid.Validate()
+				// TODO: negative?
+				if !ok || (ts == 0 && seqID == 0) {
+					settleClient(ev.client, streamKey,
+						SimpleError{"ERR The ID specified in XADD must be greater than 0-0"}.Encode())
+					return nil
+				}
+				key := msg.elements[3].(BulkString).content
+				value := msg.elements[4].(BulkString).content
+
 				if !eid.Greater(stream.lastId) {
 					settleClient(ev.client, "",
 						SimpleError{"ERR The ID specified in XADD is equal or smaller than the target stream top item"}.Encode(),
@@ -241,7 +271,7 @@ func (s *Store) handleEvent(ev Event) error {
 				}
 				stream.lastId = eid
 				stream.entries[id] = &entry{eid, key, value}
-				settleClient(ev.client, "", BulkString{id}.Encode())
+				settleClient(ev.client, "", BulkString{string(eid)}.Encode())
 			case "TYPE":
 				key := msg.elements[1].(BulkString).content
 				_, t := s.getRawValue(key)
