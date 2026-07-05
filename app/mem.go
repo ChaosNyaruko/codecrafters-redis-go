@@ -189,7 +189,7 @@ func (s *Store) handleEvent(ev Event) error {
 				key := msg.elements[2].(BulkString).content
 				value := msg.elements[1].(BulkString).content
 				stream.Pairs = append(stream.Pairs, &pair{key, value})
-				settleClient(ev.client, "", []byte("+"+"stream"+"\r\n"))
+				settleClient(ev.client, "", BulkString{"stream"}.Encode())
 			case "TYPE":
 				key := msg.elements[1].(BulkString).content
 				_, t := s.getRawValue(key)
