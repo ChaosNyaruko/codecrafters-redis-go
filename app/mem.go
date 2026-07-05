@@ -54,6 +54,16 @@ type Event struct {
 	client chan clientStatus
 }
 
+type pair struct {
+	key   string
+	value string
+}
+
+type Stream struct {
+	ID    string
+	Pairs []*pair
+}
+
 type BlockableList struct {
 	key             string
 	list            deque.Deque[any]
@@ -100,6 +110,8 @@ func (s *Store) getRawValue(key string) (any, string) {
 			return v, "string"
 		case *BlockableList:
 			return v, "list"
+		case *Stream:
+			return v, "stream"
 		default:
 			panic(fmt.Sprintf("unsupported internal type: %T", val.data))
 		}
@@ -159,6 +171,25 @@ func (s *Store) handleEvent(ev Event) error {
 		if cmd, ok := msg.elements[0].(BulkString); ok {
 			command := strings.ToUpper(cmd.content)
 			switch command {
+			case "XADD":
+				// NOTE: we only support explicit id for now.
+				id := msg.elements[1].(BulkString).content
+				val, t := s.getRawValue(id)
+				if val == nil {
+					s.store[id] = item{
+						data: &Stream{ID: id, Pairs: []*pair{}},
+						ts:   -1,
+					}
+				} else {
+					if t != "stream" {
+						panic(fmt.Sprintf("%v is %s, not 'stream'", id, t))
+					}
+				}
+				stream := s.store[id].data.(*Stream)
+				key := msg.elements[2].(BulkString).content
+				value := msg.elements[1].(BulkString).content
+				stream.Pairs = append(stream.Pairs, &pair{key, value})
+				settleClient(ev.client, "", []byte("+"+"stream"+"\r\n"))
 			case "TYPE":
 				key := msg.elements[1].(BulkString).content
 				_, t := s.getRawValue(key)
