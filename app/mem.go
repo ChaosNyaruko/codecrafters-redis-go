@@ -66,26 +66,31 @@ type eidGenType int
 
 const (
 	manualEID      eidGenType = 0
-	partialAutoEID            = 1
-	fullAutoEID               = 2
-	errEID                    = 255
+	partialAutoEID eidGenType = 1
+	fullAutoEID    eidGenType = 2
+	errEID         eidGenType = 255
 )
 
 func (a entryID) autoGen(lastID entryID) (eidGenType, entryID) {
 	_, lastts, lastsid := lastID.Validate()
 	ida := strings.SplitN(string(a), "-", 2)
-	now := time.Now().UnixMilli()
+	sid := 0
 	if len(ida) < 2 {
 		if ida[0] == "*" {
+			now := time.Now().UnixMilli()
 			if now == lastts {
-				return fullAutoEID, entryID(strconv.Itoa(int(now)) + "-" + strconv.Itoa(int(lastsid)+1))
+				sid = int(lastsid) + 1
 			}
-			return fullAutoEID, entryID(strconv.Itoa(int(now)) + "-" + strconv.Itoa(0))
+			return fullAutoEID, entryID(strconv.Itoa(int(now)) + "-" + strconv.Itoa(sid))
 		}
 		return errEID, ""
 	}
 	if ida[1] == "*" {
-		return partialAutoEID, entryID(strconv.Itoa(int(lastts)) + "-" + strconv.Itoa(int(lastsid)+1))
+		mants, _ := strconv.ParseInt(ida[0], 10, 64)
+		if mants == lastts {
+			sid = int(lastsid) + 1
+		}
+		return partialAutoEID, entryID(ida[0] + "-" + strconv.Itoa(sid))
 	}
 
 	return manualEID, a
@@ -253,6 +258,7 @@ func (s *Store) handleEvent(ev Event) error {
 				}
 				stream := s.store[streamKey].data.(*Stream)
 				_, eid := entryID(id).autoGen(stream.lastId)
+				log.Printf("auto genid for %v => %v", id, eid)
 				ok, ts, seqID := eid.Validate()
 				// TODO: negative?
 				if !ok || (ts == 0 && seqID == 0) {
