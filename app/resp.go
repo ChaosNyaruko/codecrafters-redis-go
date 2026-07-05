@@ -28,6 +28,12 @@ type BulkString struct {
 	content string
 }
 
+type SimpleError struct {
+	msg string
+}
+
+var _ RESP = SimpleError{}
+
 type Decoder struct {
 	s *bufio.Scanner
 }
@@ -74,6 +80,10 @@ func (d *Decoder) Decode(data []byte) (RESP, error) {
 	default:
 		panic(fmt.Sprintf("not supported, %v", t))
 	}
+}
+
+func (err SimpleError) Encode() []byte {
+	return []byte("-" + err.msg + "\r\n")
 }
 
 func (arr Array) Encode() []byte {
