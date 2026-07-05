@@ -209,8 +209,8 @@ func (s *Store) handleEvent(ev Event) error {
 				streamKey := msg.elements[1].(BulkString).content
 				id := msg.elements[2].(BulkString).content
 				eid := entryID(id)
-				ok, _, _ := eid.Validate()
-				if !ok {
+				ok, ts, seqID := eid.Validate()
+				if !ok || (ts == 0 && seqID == 0) {
 					settleClient(ev.client, streamKey,
 						SimpleError{"The ID specified in XADD must be greater than 0-0"}.Encode())
 					return nil
