@@ -89,25 +89,25 @@ func newBlockableList(key string, eventCh chan Event) *BlockableList {
 	return bl
 }
 
-// getRawValue returns the internal represention of data: string, slice, or other structs
-// not `item`, neither `BulkString` (binary/RESP)s
-func (s *Store) getRawValue(key string) any {
+// getRawValue returns the internal type and represention of data: string, slice, or other structs
+// not `item`, neither `BulkString` (binary/RESP)
+func (s *Store) getRawValue(key string) (any, string) {
 	if val, ok := s.store[key]; !ok || val.ts > 0 && val.ts < time.Now().UnixMilli() {
-		return nil
+		return nil, "none"
 	} else {
 		switch v := val.data.(type) {
 		case string:
-			return v
+			return v, "string"
 		case *BlockableList:
-			return v
+			return v, "list"
 		default:
-			panic(fmt.Sprintf("unknown internal type: %T", val.data))
+			panic(fmt.Sprintf("unsupported internal type: %T", val.data))
 		}
 	}
 }
 
 func (s *Store) nonBlockingLPOP(key string) (RESP, bool) {
-	val := s.getRawValue(key)
+	val, _ := s.getRawValue(key)
 	if val == nil {
 		return nil, false
 	}
@@ -159,6 +159,11 @@ func (s *Store) handleEvent(ev Event) error {
 		if cmd, ok := msg.elements[0].(BulkString); ok {
 			command := strings.ToUpper(cmd.content)
 			switch command {
+			case "TYPE":
+				key := msg.elements[1].(BulkString).content
+				_, t := s.getRawValue(key)
+				bv := BulkString{t}
+				settleClient(ev.client, "", bv.Encode())
 			case "PING":
 				settleClient(ev.client, "", []byte("+PONG\r\n"))
 			case "ECHO":
@@ -166,7 +171,7 @@ func (s *Store) handleEvent(ev Event) error {
 				settleClient(ev.client, key.content, key.Encode())
 			case "GET":
 				key := msg.elements[1].(BulkString).content
-				if val := s.getRawValue(key); val == nil {
+				if val, _ := s.getRawValue(key); val == nil {
 					settleClient(ev.client, key, nullBulkString)
 				} else {
 					bv := BulkString{val.(string)}
@@ -196,7 +201,7 @@ func (s *Store) handleEvent(ev Event) error {
 				settleClient(ev.client, key, OK)
 			case "BLPOP":
 				listKey := msg.elements[1].(BulkString).content
-				val := s.getRawValue(listKey)
+				val, _ := s.getRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = item{
 						data: newBlockableList(listKey, s.ch),
@@ -226,7 +231,7 @@ func (s *Store) handleEvent(ev Event) error {
 				}
 			case "RPOP", "LPOP":
 				listKey := msg.elements[1].(BulkString).content
-				val := s.getRawValue(listKey)
+				val, _ := s.getRawValue(listKey)
 				if val == nil {
 					settleClient(ev.client, listKey, nullBulkString)
 					return nil
@@ -263,7 +268,7 @@ func (s *Store) handleEvent(ev Event) error {
 
 			case "RPUSH", "LPUSH":
 				listKey := msg.elements[1].(BulkString).content
-				val := s.getRawValue(listKey)
+				val, _ := s.getRawValue(listKey)
 				if val == nil {
 					s.store[listKey] = item{
 						data: newBlockableList(listKey, s.ch),
@@ -305,7 +310,7 @@ func (s *Store) handleEvent(ev Event) error {
 				settleClient(ev.client, listKey, Integer{content: length}.Encode())
 			case "LRANGE":
 				listKey := msg.elements[1].(BulkString).content
-				val := s.getRawValue(listKey)
+				val, _ := s.getRawValue(listKey)
 				if val == nil {
 					settleClient(ev.client, listKey, Array{}.Encode())
 					return nil
@@ -330,7 +335,7 @@ func (s *Store) handleEvent(ev Event) error {
 				settleClient(ev.client, listKey, res.Encode())
 			case "LLEN":
 				listKey := msg.elements[1].(BulkString).content
-				val := s.getRawValue(listKey)
+				val, _ := s.getRawValue(listKey)
 				res := Integer{0}
 				if val != nil {
 					cur := s.store[listKey].data.(*BlockableList)
