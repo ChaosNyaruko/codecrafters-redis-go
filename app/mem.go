@@ -235,7 +235,7 @@ func (s *Store) handleEvent(ev Event) error {
 				stream := s.store[streamKey].data.(*Stream)
 				if !eid.Greater(stream.lastId) {
 					settleClient(ev.client, "",
-						SimpleError{"-ERR The ID specified in XADD is equal or smaller than the target stream top item"}.Encode(),
+						SimpleError{"ERR The ID specified in XADD is equal or smaller than the target stream top item"}.Encode(),
 					)
 					return nil
 				}
