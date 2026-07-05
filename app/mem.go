@@ -54,14 +54,15 @@ type Event struct {
 	client chan clientStatus
 }
 
-type pair struct {
+type entry struct {
+	id    string
 	key   string
 	value string
 }
 
 type Stream struct {
-	ID    string
-	Pairs []*pair
+	key     string
+	entries []*entry
 }
 
 type BlockableList struct {
@@ -173,11 +174,15 @@ func (s *Store) handleEvent(ev Event) error {
 			switch command {
 			case "XADD":
 				// NOTE: we only support explicit id for now.
-				id := msg.elements[1].(BulkString).content
-				val, t := s.getRawValue(id)
+				streamKey := msg.elements[1].(BulkString).content
+				id := msg.elements[2].(BulkString).content
+				key := msg.elements[3].(BulkString).content
+				value := msg.elements[4].(BulkString).content
+
+				val, t := s.getRawValue(streamKey)
 				if val == nil {
-					s.store[id] = item{
-						data: &Stream{ID: id, Pairs: []*pair{}},
+					s.store[streamKey] = item{
+						data: &Stream{key: streamKey, entries: []*entry{}},
 						ts:   -1,
 					}
 				} else {
@@ -185,11 +190,9 @@ func (s *Store) handleEvent(ev Event) error {
 						panic(fmt.Sprintf("%v is %s, not 'stream'", id, t))
 					}
 				}
-				stream := s.store[id].data.(*Stream)
-				key := msg.elements[2].(BulkString).content
-				value := msg.elements[1].(BulkString).content
-				stream.Pairs = append(stream.Pairs, &pair{key, value})
-				settleClient(ev.client, "", BulkString{"stream"}.Encode())
+				stream := s.store[streamKey].data.(*Stream)
+				stream.entries = append(stream.entries, &entry{id, key, value})
+				settleClient(ev.client, "", BulkString{id}.Encode())
 			case "TYPE":
 				key := msg.elements[1].(BulkString).content
 				_, t := s.getRawValue(key)
