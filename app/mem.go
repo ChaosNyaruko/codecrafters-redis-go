@@ -294,56 +294,68 @@ func (s *Store) handleEvent(ev Event) error {
 			switch command {
 			case "XREAD":
 				_ = msg.elements[1].(BulkString).content // optional
-				streamKey := msg.elements[2].(BulkString).content
-				id := msg.elements[3].(BulkString).content
-				_, ts1, seq1 := entryID(id).Validate()
-				if ts1 == -1 {
-					if id != "-" {
-						settleClient(ev.client, streamKey,
-							SimpleError{"Invalid <start> for XRANGE"}.Encode())
-					} else {
-						ts1 = 0
-					}
-				}
-				if seq1 == -1 {
-					id = strconv.Itoa(int(ts1)) + "-" + "0"
-				}
-
-				val, t := s.getRawValue(streamKey)
-				if val == nil {
-					settleClient(ev.client, streamKey, nullBulkString)
-					return nil
-				} else {
-					if t != "stream" {
-						panic(fmt.Sprintf("%v is %s, not 'stream'", streamKey, t))
-					}
-				}
-				// WARNING: it is very inefficient to call the sort process everytime!! But the standard Redis implementation is O(N) for N elements, you can optimize if you care about it
-				stream := s.store[streamKey].data.(*Stream)
-				sortedEntries := make([]*entry, 0, len(stream.entries))
-				for _, v := range stream.entries {
-					sortedEntries = append(sortedEntries, v)
-				}
-				log.Printf("sortedEntries: %v", sortedEntries)
-				log.Printf("map sortedEntries: %v", stream.entries)
-				sort.Slice(sortedEntries, func(i, j int) bool {
-					return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
-				})
-				i := sort.Search(len(sortedEntries), func(k int) bool {
-					return sortedEntries[k].id.Greater(entryID(id))
-				})
-				log.Printf("<id>: %v, i: %v", id, i)
-				res := sortedEntries[i:]
-				log.Printf("res: %v", res)
-				elements := make([]RESP, len(res))
-				for k, ent := range res {
-					elements[k] = ent.ToArray()
-				}
+				keys := []string{}
+				ids := []string{}
 				result := Array{elements: []RESP{}}
-				result.elements = append(result.elements, Array{
-					elements: []RESP{BulkString{streamKey}, Array{elements: elements}},
-				})
-				settleClient(ev.client, streamKey, result.Encode())
+				nums := len(msg.elements[2:]) / 2
+				for i := range nums {
+					key := msg.elements[i+2].(BulkString).content
+					id := msg.elements[i+2+nums].(BulkString).content
+					keys = append(keys, key)
+					ids = append(ids, id)
+				}
+				log.Printf("nums: %v, keys: %v, ids: %v", nums, keys, ids)
+
+				for k, streamKey := range keys {
+					id := ids[k]
+					_, ts1, seq1 := entryID(id).Validate()
+					if ts1 == -1 {
+						if id != "-" {
+							settleClient(ev.client, streamKey,
+								SimpleError{"Invalid <start> for XREAD " + id}.Encode())
+						} else {
+							ts1 = 0
+						}
+					}
+					if seq1 == -1 {
+						id = strconv.Itoa(int(ts1)) + "-" + "0"
+					}
+
+					val, t := s.getRawValue(streamKey)
+					if val == nil {
+						settleClient(ev.client, streamKey, nullBulkString)
+						return nil
+					} else {
+						if t != "stream" {
+							panic(fmt.Sprintf("%v is %s, not 'stream'", streamKey, t))
+						}
+					}
+					// WARNING: it is very inefficient to call the sort process everytime!! But the standard Redis implementation is O(N) for N elements, you can optimize if you care about it
+					stream := s.store[streamKey].data.(*Stream)
+					sortedEntries := make([]*entry, 0, len(stream.entries))
+					for _, v := range stream.entries {
+						sortedEntries = append(sortedEntries, v)
+					}
+					log.Printf("sortedEntries: %v", sortedEntries)
+					log.Printf("map sortedEntries: %v", stream.entries)
+					sort.Slice(sortedEntries, func(i, j int) bool {
+						return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
+					})
+					i := sort.Search(len(sortedEntries), func(k int) bool {
+						return sortedEntries[k].id.Greater(entryID(id))
+					})
+					log.Printf("<id>: %v, i: %v", id, i)
+					res := sortedEntries[i:]
+					log.Printf("res: %v", res)
+					elements := make([]RESP, len(res))
+					for k, ent := range res {
+						elements[k] = ent.ToArray()
+					}
+					result.elements = append(result.elements, Array{
+						elements: []RESP{BulkString{streamKey}, Array{elements: elements}},
+					})
+				}
+				settleClient(ev.client, "XREAD STREAM", result.Encode())
 				return nil
 
 			case "XRANGE":
