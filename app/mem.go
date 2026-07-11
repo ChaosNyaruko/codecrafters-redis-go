@@ -330,7 +330,7 @@ func (s *Store) handleEvent(ev Event) error {
 					return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
 				})
 				i := sort.Search(len(sortedEntries), func(k int) bool {
-					return sortedEntries[k].id.GreaterOrEqual(entryID(id))
+					return sortedEntries[k].id.Greater(entryID(id))
 				})
 				log.Printf("<id>: %v, i: %v", id, i)
 				res := sortedEntries[i:]
