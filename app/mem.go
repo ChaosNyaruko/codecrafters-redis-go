@@ -298,9 +298,27 @@ func (s *Store) handleEvent(ev Event) error {
 				end := msg.elements[3].(BulkString).content
 				_, ts1, seq1 := entryID(start).Validate()
 				_, ts2, seq2 := entryID(end).Validate()
+				if ts1 == -1 {
+					if start != "-" {
+						settleClient(ev.client, streamKey,
+							SimpleError{"Invalid <start> for XRANGE"}.Encode())
+					} else {
+						ts1 = 0
+					}
+				}
 				if seq1 == -1 {
 					start = strconv.Itoa(int(ts1)) + "-" + "0"
 				}
+
+				if ts2 == -1 {
+					if end != "+" {
+						settleClient(ev.client, streamKey,
+							SimpleError{"Invalid <end> for XRANGE"}.Encode())
+					} else {
+						ts2 = math.MaxInt64
+					}
+				}
+
 				if seq2 == -1 {
 					end = strconv.Itoa(int(ts2)) + "-" + strconv.Itoa(math.MaxInt64)
 				} else {
