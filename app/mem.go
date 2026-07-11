@@ -339,14 +339,11 @@ func (s *Store) handleEvent(ev Event) error {
 				for k, ent := range res {
 					elements[k] = ent.ToArray()
 				}
-				settleClient(ev.client, streamKey, Array{
-					elements: []RESP{
-						BulkString{streamKey},
-						Array{
-							elements: elements,
-						},
-					},
-				}.Encode())
+				result := Array{elements: []RESP{}}
+				result.elements = append(result.elements, Array{
+					elements: []RESP{BulkString{streamKey}, Array{elements: elements}},
+				})
+				settleClient(ev.client, streamKey, result.Encode())
 				return nil
 
 			case "XRANGE":
