@@ -149,6 +149,20 @@ func (a entryID) Validate() (bool, int64, int64) {
 	return true, ts, id
 }
 
+// Greaterreturns whether a >= b
+func (a entryID) Greater(b entryID) bool {
+	v1, ts1, id1 := a.Validate()
+	v2, ts2, id2 := b.Validate()
+	if !v1 || !v2 {
+		return false
+	}
+	if ts1 == ts2 {
+		// NOTE: we assure no dups
+		return id1 > id2
+	}
+	return ts1 > ts2
+}
+
 // GreaterOrEqual returns whether a >= b
 func (a entryID) GreaterOrEqual(b entryID) bool {
 	v1, ts1, id1 := a.Validate()
@@ -360,7 +374,7 @@ func (s *Store) handleEvent(ev Event) error {
 						SimpleError{"ERR The ID specified in XADD must be greater than 0-0"}.Encode())
 					return nil
 				}
-				if !eid.GreaterOrEqual(stream.lastId) {
+				if !eid.Greater(stream.lastId) {
 					settleClient(ev.client, "",
 						SimpleError{"ERR The ID specified in XADD is equal or smaller than the target stream top item"}.Encode(),
 					)
