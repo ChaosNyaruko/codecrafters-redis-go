@@ -335,13 +335,13 @@ func (s *Store) handleEvent(ev Event) error {
 				log.Printf("<id>: %v, i: %v", id, i)
 				res := sortedEntries[i:]
 				log.Printf("res: %v", res)
-				elements := make([]RESP, len(res)+1)
-				elements[0] = BulkString{streamKey}
+				elements := make([]RESP, len(res))
 				for k, ent := range res {
-					elements[k+1] = ent.ToArray()
+					elements[k] = ent.ToArray()
 				}
 				settleClient(ev.client, streamKey, Array{
 					elements: []RESP{
+						BulkString{streamKey},
 						Array{
 							elements: elements,
 						},
