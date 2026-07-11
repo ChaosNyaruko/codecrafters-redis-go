@@ -308,7 +308,7 @@ func (s *Store) handleEvent(ev Event) error {
 				if seq1 == -1 {
 					id = strconv.Itoa(int(ts1)) + "-" + "0"
 				}
-				
+
 				val, t := s.getRawValue(streamKey)
 				if val == nil {
 					settleClient(ev.client, streamKey, nullBulkString)
@@ -335,12 +335,17 @@ func (s *Store) handleEvent(ev Event) error {
 				log.Printf("<id>: %v, i: %v", id, i)
 				res := sortedEntries[i:]
 				log.Printf("res: %v", res)
-				elements := make([]RESP, len(res))
+				elements := make([]RESP, len(res)+1)
+				elements[0] = BulkString{streamKey}
 				for k, ent := range res {
-					elements[k] = ent.ToArray()
+					elements[k+1] = ent.ToArray()
 				}
 				settleClient(ev.client, streamKey, Array{
-					elements: elements,
+					elements: []RESP{
+						Array{
+							elements: elements,
+						},
+					},
 				}.Encode())
 				return nil
 
