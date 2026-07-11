@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -66,21 +64,6 @@ type entry struct {
 	pairs []pair
 }
 
-func (e *entry) String() string {
-	return string(e.id)
-}
-
-func (e entry) ToArray() RESP {
-	id := BulkString{string(e.id)}
-	ps := Array{}
-	for _, p := range e.pairs {
-		ps.elements = append(ps.elements, BulkString{string(p.key)}, BulkString{string(p.value)})
-	}
-	return Array{
-		elements: []RESP{id, ps},
-	}
-}
-
 type entryID string
 
 type eidGenType int
@@ -120,37 +103,20 @@ func (a entryID) autoGen(lastID entryID) (eidGenType, entryID) {
 func (a entryID) Validate() (bool, int64, int64) {
 	ida := strings.SplitN(string(a), "-", 2)
 	if len(ida) < 2 {
-		if ida[0] != "*" {
-			ts, err := strconv.ParseInt(ida[0], 10, 64)
-			if err != nil {
-				return false, -1, -1
-			}
-			return true, ts, -1
-		}
-		// for id = "*"
-		return true, -1, -1
+		return false, 0, 0
 	}
 	ts, err := strconv.ParseInt(ida[0], 10, 64)
 	if err != nil {
-		return false, -1, -1
+		return false, 0, 0
 	}
 	id, err := strconv.ParseInt(ida[1], 10, 64)
-	if err != nil && ida[1] != "*" {
-		sid, err := strconv.ParseInt(ida[1], 10, 64)
-		if err != nil {
-			return false, -1, -1
-		}
-		return false, ts, sid
-	}
 	if err != nil {
-		// for id = "ts"-"*"
-		id = -1
+		return false, 0, 0
 	}
 	return true, ts, id
 }
 
-// GreaterOrEqual returns whether a >= b
-func (a entryID) GreaterOrEqual(b entryID) bool {
+func (a entryID) Greater(b entryID) bool {
 	v1, ts1, id1 := a.Validate()
 	v2, ts2, id2 := b.Validate()
 	if !v1 || !v2 {
@@ -158,9 +124,9 @@ func (a entryID) GreaterOrEqual(b entryID) bool {
 	}
 	if ts1 == ts2 {
 		// NOTE: we assure no dups
-		return id1 >= id2
+		return id1 > id2
 	}
-	return ts1 >= ts2
+	return ts1 > ts2
 }
 
 type Stream struct {
@@ -168,8 +134,6 @@ type Stream struct {
 	entries map[string]*entry
 	lastId  entryID
 }
-
-type sortedEntries []entry
 
 type BlockableList struct {
 	key             string
@@ -244,7 +208,7 @@ func (s *Store) start(ctx context.Context) error {
 			log.Printf("loop cancelled")
 			return nil
 		case <-s.t.C:
-			// log.Printf("store timely work")
+			log.Printf("store timely work")
 		case ev, ok := <-s.ch:
 			if !ok {
 				log.Printf("event channel closed")
@@ -279,58 +243,9 @@ func (s *Store) handleEvent(ev Event) error {
 			command := strings.ToUpper(cmd.content)
 			switch command {
 			case "XRANGE":
-				streamKey := msg.elements[1].(BulkString).content
-				start := msg.elements[2].(BulkString).content
-				end := msg.elements[3].(BulkString).content
-				_, ts1, seq1 := entryID(start).Validate()
-				_, ts2, seq2 := entryID(end).Validate()
-				if seq1 == -1 {
-					start = strconv.Itoa(int(ts1)) + "-" + "0"
-				}
-				if seq2 == -1 {
-					end = strconv.Itoa(int(ts2)) + "-" + strconv.Itoa(math.MaxInt64)
-				} else {
-					end = strconv.Itoa(int(ts2)) + "-" + strconv.Itoa(int(seq2+1))
-				}
-				val, t := s.getRawValue(streamKey)
-				if val == nil {
-					settleClient(ev.client, streamKey, nullBulkString)
-					return nil
-				} else {
-					if t != "stream" {
-						panic(fmt.Sprintf("%v is %s, not 'stream'", streamKey, t))
-					}
-				}
-				// WARNING: it is very inefficient to call the sort process everytime!! But the standard Redis implementation is O(N) for N elements, you can optimize if you care about it
-				stream := s.store[streamKey].data.(*Stream)
-				sortedEntries := make([]*entry, 0, len(stream.entries))
-				for _, v := range stream.entries {
-					sortedEntries = append(sortedEntries, v)
-				}
-				log.Printf("sortedEntries: %v", sortedEntries)
-				log.Printf("map sortedEntries: %v", stream.entries)
-				sort.Slice(sortedEntries, func(i, j int) bool {
-					return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
-				})
-				i := sort.Search(len(sortedEntries), func(k int) bool {
-					return sortedEntries[k].id.GreaterOrEqual(entryID(start))
-				})
-				// jth is the first element that strictly Greater than the original end
-				j := sort.Search(len(sortedEntries), func(k int) bool {
-					return sortedEntries[k].id.GreaterOrEqual(entryID(end))
-				})
-				log.Printf("start: %v, end: %v, i: %v, j: %v", start, end, i, j)
-				// [i, j-1]
-				res := sortedEntries[i:j]
-				log.Printf("res: %v", res)
-				elements := make([]RESP, len(res))
-				for k, ent := range res {
-					elements[k] = ent.ToArray()
-				}
-				settleClient(ev.client, streamKey, Array{
-					elements: elements,
-				}.Encode())
-				return nil
+				// streamKey := msg.elements[1].(BulkString).content
+				// start := msg.elements[2].(BulkString).content
+				// end := msg.elements[3].(BulkString).content
 
 			case "XADD":
 				// NOTE: we only support explicit id for now.
@@ -360,7 +275,7 @@ func (s *Store) handleEvent(ev Event) error {
 						SimpleError{"ERR The ID specified in XADD must be greater than 0-0"}.Encode())
 					return nil
 				}
-				if !eid.GreaterOrEqual(stream.lastId) {
+				if !eid.Greater(stream.lastId) {
 					settleClient(ev.client, "",
 						SimpleError{"ERR The ID specified in XADD is equal or smaller than the target stream top item"}.Encode(),
 					)
@@ -368,14 +283,15 @@ func (s *Store) handleEvent(ev Event) error {
 				}
 
 				stream.lastId = eid
-				stream.entries[string(eid)] = &entry{
-					id:    eid,
-					pairs: []pair{},
-				}
+					stream.entries[id] = &entry{
+						id:    id,
+						pairs: []pair{},
+					}
 				for i := 3; i+1 < len(msg.elements); i += 2 {
-					key := msg.elements[i].(BulkString).content
-					value := msg.elements[i+1].(BulkString).content
-					stream.entries[string(eid)].pairs = append(stream.entries[string(eid)].pairs, pair{key, value})
+					key := msg.elements[3].(BulkString).content
+					value := msg.elements[4].(BulkString).content
+&entry{eid, key, value}
+					stream.entries[id].pairs = append(stream.entries[id].pairs, pair{key, value}
 				}
 				settleClient(ev.client, "", BulkString{string(eid)}.Encode())
 			case "TYPE":
