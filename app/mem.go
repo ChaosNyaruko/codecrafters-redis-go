@@ -406,10 +406,9 @@ func (s *Store) handleEvent(ev Event) error {
 						return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
 					})
 					if originID == "$" {
-						now := time.Now().UnixMilli()
-						timeID := entryID(fmt.Sprintf("%d-*", now))
-						_, tID := timeID.autoGen(stream.lastId)
-						curMaxID = string(tID)
+						if len(sortedEntries) > 0 {
+							curMaxID = string(sortedEntries[len(sortedEntries)-1].id)
+						}
 						id = curMaxID
 						log.Printf("gen tID: %v", curMaxID)
 					}
