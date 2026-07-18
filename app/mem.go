@@ -23,6 +23,7 @@ type EventType int
 const (
 	EventCmd = iota
 	EventCheckBlTimeout
+	EventCheckBsTimeout
 )
 
 type Store struct {
@@ -47,6 +48,7 @@ type blStatus struct {
 
 type clientStatus struct {
 	blockingKey string
+	blockingID  string // only for STREAM
 	status      any
 }
 
@@ -94,6 +96,7 @@ const (
 
 func (a entryID) autoGen(lastID entryID) (eidGenType, entryID) {
 	_, lastts, lastsid := lastID.Validate()
+	log.Printf("lastID: %v, lastts: %d, lastsid: %d", lastID, lastts, lastsid)
 	ida := strings.SplitN(string(a), "-", 2)
 	sid := 0
 	if len(ida) < 2 {
@@ -177,10 +180,14 @@ func (a entryID) GreaterOrEqual(b entryID) bool {
 	return ts1 >= ts2
 }
 
-type Stream struct {
+type BlockableStream struct {
 	key     string
 	entries map[string]*entry
 	lastId  entryID
+
+	blockingClients []*clientStatus
+	close           chan int
+	eventCh         chan Event
 }
 
 type sortedEntries []entry
@@ -191,6 +198,32 @@ type BlockableList struct {
 	blockingClients []*clientStatus
 	close           chan int
 	eventCh         chan Event
+}
+
+func newBlockableStream(key string, eventCh chan Event) *BlockableStream {
+	bs := &BlockableStream{
+		key:             key,
+		entries:         map[string]*entry{},
+		lastId:          "0-0",
+		blockingClients: []*clientStatus{},
+	}
+	go func() {
+		t := time.NewTicker(50 * time.Millisecond)
+	loop:
+		for {
+			select {
+			case <-t.C:
+				eventCh <- Event{
+					Type: EventCheckBsTimeout,
+					Data: key,
+				}
+			case <-bs.close:
+				log.Printf("blockstream closed")
+				break loop
+			}
+		}
+	}()
+	return bs
 }
 
 func newBlockableList(key string, eventCh chan Event) *BlockableList {
@@ -231,7 +264,7 @@ func (s *Store) getRawValue(key string) (any, string) {
 			return v, "string"
 		case *BlockableList:
 			return v, "list"
-		case *Stream:
+		case *BlockableStream:
 			return v, "stream"
 		default:
 			panic(fmt.Sprintf("unsupported internal type: %T", val.data))
@@ -272,6 +305,20 @@ func (s *Store) start(ctx context.Context) error {
 
 func (s *Store) handleEvent(ev Event) error {
 	switch ev.Type {
+	case EventCheckBsTimeout:
+		key := ev.Data.(string)
+		cur := s.store[key].data.(*BlockableStream)
+		next := []*clientStatus{}
+		for i, c := range cur.blockingClients {
+			s := c.status.(blStatus)
+			if time.Now().UnixMilli()-s.start >= s.timeout {
+				log.Printf("client removed: %d", i)
+				s.result <- nullArray
+			} else {
+				next = append(next, c)
+			}
+		}
+		cur.blockingClients = next
 	case EventCheckBlTimeout:
 		key := ev.Data.(string)
 		cur := s.store[key].data.(*BlockableList)
@@ -293,18 +340,28 @@ func (s *Store) handleEvent(ev Event) error {
 			command := strings.ToUpper(cmd.content)
 			switch command {
 			case "XREAD":
-				_ = msg.elements[1].(BulkString).content // optional
+				xType := strings.ToUpper(msg.elements[1].(BulkString).content) // optional
 				keys := []string{}
 				ids := []string{}
+				keysOffest := 2
+				timeout := -1 // in miliseconds
+				if xType == "BLOCK" {
+					keysOffest += 2
+					timeout = toInt(msg.elements[2])
+				}
 				result := Array{elements: []RESP{}}
-				nums := len(msg.elements[2:]) / 2
+				nums := len(msg.elements[keysOffest:]) / 2
 				for i := range nums {
-					key := msg.elements[i+2].(BulkString).content
-					id := msg.elements[i+2+nums].(BulkString).content
+					key := msg.elements[i+keysOffest].(BulkString).content
+					id := msg.elements[i+keysOffest+nums].(BulkString).content
 					keys = append(keys, key)
 					ids = append(ids, id)
 				}
-				log.Printf("nums: %v, keys: %v, ids: %v", nums, keys, ids)
+				log.Printf("keyOffset: %v, nums: %v, keys: %v, ids: %v", keysOffest, nums, keys, ids)
+				if timeout >= 0 && len(keys) > 1 { // it's a block command
+					panic("XREAD BLOCK should only have one key")
+				}
+				blocked := false
 
 				for k, streamKey := range keys {
 					id := ids[k]
@@ -323,21 +380,27 @@ func (s *Store) handleEvent(ev Event) error {
 
 					val, t := s.getRawValue(streamKey)
 					if val == nil {
-						settleClient(ev.client, streamKey, nullBulkString)
-						return nil
+						s.store[streamKey] = item{
+							data: newBlockableStream(streamKey, s.ch),
+							ts:   -1,
+						}
 					} else {
 						if t != "stream" {
 							panic(fmt.Sprintf("%v is %s, not 'stream'", streamKey, t))
 						}
 					}
 					// WARNING: it is very inefficient to call the sort process everytime!! But the standard Redis implementation is O(N) for N elements, you can optimize if you care about it
-					stream := s.store[streamKey].data.(*Stream)
+					stream := s.store[streamKey].data.(*BlockableStream)
 					sortedEntries := make([]*entry, 0, len(stream.entries))
 					for _, v := range stream.entries {
 						sortedEntries = append(sortedEntries, v)
 					}
 					log.Printf("sortedEntries: %v", sortedEntries)
 					log.Printf("map sortedEntries: %v", stream.entries)
+					if timeout > 0 && len(sortedEntries) == 0 {
+						blocked = true
+						break
+					}
 					sort.Slice(sortedEntries, func(i, j int) bool {
 						return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
 					})
@@ -355,7 +418,25 @@ func (s *Store) handleEvent(ev Event) error {
 						elements: []RESP{BulkString{streamKey}, Array{elements: elements}},
 					})
 				}
-				settleClient(ev.client, "XREAD STREAM", result.Encode())
+				if blocked {
+					bKey := keys[0]
+					bID := ids[0]
+					log.Printf("XREAD blocked: %v, %v", blocked, bKey)
+					cur := s.store[bKey].data.(*BlockableStream)
+					bl := blStatus{
+						result:  make(chan []byte),
+						start:   time.Now().UnixMilli(),
+						timeout: int64(timeout),
+					}
+					cur.blockingClients = append(cur.blockingClients, &clientStatus{
+						blockingKey: bKey,
+						blockingID:  bID,
+						status:      bl,
+					})
+					settleClient(ev.client, bKey, bl)
+				} else {
+					settleClient(ev.client, "XREAD STREAM", result.Encode())
+				}
 				return nil
 
 			case "XRANGE":
@@ -400,7 +481,7 @@ func (s *Store) handleEvent(ev Event) error {
 					}
 				}
 				// WARNING: it is very inefficient to call the sort process everytime!! But the standard Redis implementation is O(N) for N elements, you can optimize if you care about it
-				stream := s.store[streamKey].data.(*Stream)
+				stream := s.store[streamKey].data.(*BlockableStream)
 				sortedEntries := make([]*entry, 0, len(stream.entries))
 				for _, v := range stream.entries {
 					sortedEntries = append(sortedEntries, v)
@@ -437,18 +518,15 @@ func (s *Store) handleEvent(ev Event) error {
 				val, t := s.getRawValue(streamKey)
 				if val == nil {
 					s.store[streamKey] = item{
-						data: &Stream{key: streamKey,
-							entries: make(map[string]*entry),
-							lastId:  "0-0",
-						},
-						ts: -1,
+						data: newBlockableStream(streamKey, s.ch),
+						ts:   -1,
 					}
 				} else {
 					if t != "stream" {
 						panic(fmt.Sprintf("%v is %s, not 'stream'", id, t))
 					}
 				}
-				stream := s.store[streamKey].data.(*Stream)
+				stream := s.store[streamKey].data.(*BlockableStream)
 				_, eid := entryID(id).autoGen(stream.lastId)
 				log.Printf("auto genid for %v => %v", id, eid)
 				ok, ts, seqID := eid.Validate()
@@ -475,6 +553,23 @@ func (s *Store) handleEvent(ev Event) error {
 					value := msg.elements[i+1].(BulkString).content
 					stream.entries[string(eid)].pairs = append(stream.entries[string(eid)].pairs, pair{key, value})
 				}
+				next := []*clientStatus{}
+				for _, c := range stream.blockingClients {
+					if eid.Greater(entryID(c.blockingID)) {
+						entry := stream.entries[string(eid)]
+						res := Array{}
+						elements := []RESP{entry.ToArray()}
+						res.elements = append(res.elements, Array{
+							elements: []RESP{BulkString{streamKey}, Array{elements: elements}},
+						})
+						log.Printf("trying to send result: %#v", res)
+						c.status.(blStatus).result <- res.Encode()
+						log.Printf("[over]trying to send result: %#v", res)
+					} else {
+						next = append(next, c)
+					}
+				}
+				stream.blockingClients = next
 				settleClient(ev.client, "", BulkString{string(eid)}.Encode())
 			case "TYPE":
 				key := msg.elements[1].(BulkString).content
