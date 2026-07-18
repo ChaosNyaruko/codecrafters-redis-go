@@ -348,6 +348,9 @@ func (s *Store) handleEvent(ev Event) error {
 				if xType == "BLOCK" {
 					keysOffest += 2
 					timeout = toInt(msg.elements[2])
+					if timeout == 0 {
+						timeout = 24 * 365 * 10 * 3600
+					}
 				}
 				result := Array{elements: []RESP{}}
 				nums := len(msg.elements[keysOffest:]) / 2
