@@ -397,10 +397,6 @@ func (s *Store) handleEvent(ev Event) error {
 					}
 					log.Printf("sortedEntries: %v", sortedEntries)
 					log.Printf("map sortedEntries: %v", stream.entries)
-					if timeout > 0 && len(sortedEntries) == 0 {
-						blocked = true
-						break
-					}
 					sort.Slice(sortedEntries, func(i, j int) bool {
 						return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
 					})
@@ -409,6 +405,10 @@ func (s *Store) handleEvent(ev Event) error {
 					})
 					log.Printf("<id>: %v, i: %v", id, i)
 					res := sortedEntries[i:]
+					if timeout > 0 && len(res) == 0 {
+						blocked = true
+						break
+					}
 					log.Printf("res: %v", res)
 					elements := make([]RESP, len(res))
 					for k, ent := range res {
