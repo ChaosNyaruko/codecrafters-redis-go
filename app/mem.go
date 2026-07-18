@@ -365,12 +365,14 @@ func (s *Store) handleEvent(ev Event) error {
 					panic("XREAD BLOCK should only have one key")
 				}
 				blocked := false
+				curMaxID := "0-0"
 
 				for k, streamKey := range keys {
 					id := ids[k]
+					originID := id
 					_, ts1, seq1 := entryID(id).Validate()
 					if ts1 == -1 {
-						if id != "-" {
+						if id != "-" && id != "$" {
 							settleClient(ev.client, streamKey,
 								SimpleError{"Invalid <start> for XREAD " + id}.Encode())
 						} else {
@@ -403,6 +405,14 @@ func (s *Store) handleEvent(ev Event) error {
 					sort.Slice(sortedEntries, func(i, j int) bool {
 						return !sortedEntries[i].id.GreaterOrEqual(sortedEntries[j].id)
 					})
+					if originID == "$" {
+						now := time.Now().UnixMilli()
+						timeID := entryID(fmt.Sprintf("%d-*", now))
+						_, tID := timeID.autoGen(stream.lastId)
+						curMaxID = string(tID)
+						id = curMaxID
+						log.Printf("gen tID: %v", curMaxID)
+					}
 					i := sort.Search(len(sortedEntries), func(k int) bool {
 						return sortedEntries[k].id.Greater(entryID(id))
 					})
@@ -424,7 +434,10 @@ func (s *Store) handleEvent(ev Event) error {
 				if blocked {
 					bKey := keys[0]
 					bID := ids[0]
-					log.Printf("XREAD blocked: %v, %v", blocked, bKey)
+					if bID == "$" {
+						bID = curMaxID
+					}
+					log.Printf("XREAD blocked: %v, %v, %v", blocked, bKey, bID)
 					cur := s.store[bKey].data.(*BlockableStream)
 					bl := blStatus{
 						result:  make(chan []byte),
